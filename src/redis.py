@@ -13,6 +13,7 @@ class Queue(Enum):
     order_queue = f'queue:{os.getenv("ORDER_QUEUE_NAME")}'
     payment_queue = f'queue:{os.getenv("PAYMENT_QUEUE_NAME")}'
     inventory_queue = f'queue:{os.getenv("INVENTORY_QUEUE_NAME")}'
+    delivery_queue = f'queue:{os.getenv("DELIVERY_QUEUE_NAME")}'
 
 
 class RedisResource:

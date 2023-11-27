@@ -3,7 +3,7 @@ import logging as LOG
 import json
 import uuid
 from dotenv import load_dotenv
-from src.redis import RedisResource
+from src.redis import RedisResource, Queue
 import src.db_services as _services
 
 load_dotenv()
@@ -58,6 +58,9 @@ def process_message(data):
     """
     LOG.info("Deducting tokens")
     _services.deduct_tokens(data["num_tokens"])
+
+    LOG.info("Pushing to INVENTORY queue")
+    RedisResource.push_to_queue(Queue.delivery_queue, data)
 
 
 def main():
