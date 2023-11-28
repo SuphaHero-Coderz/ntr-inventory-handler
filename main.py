@@ -1,9 +1,11 @@
 import os
+import requests
 import logging as LOG
 import json
 import uuid
 from dotenv import load_dotenv
 from src.redis import RedisResource, Queue
+from src.exceptions import InsufficientTokensError
 import src.db_services as _services
 
 load_dotenv()
@@ -52,15 +54,107 @@ def watch_queue(redis_conn, queue_name, callback_func, timeout=30):
                 redis_conn.publish(INVENTORY_QUEUE_NAME, json.dumps(task))
 
 
+def update_order_status(order_id: int, status: str, status_message: str) -> None:
+    """
+    Sends a request to update order status in order service
+
+    Args:
+        order_id (int): order id to update
+        status (str): status message
+    """
+    LOG.info(f"Updating status for order with id {order_id}: {status}")
+    requests.put(
+        "http://order-handler/update-order-status",
+        params={
+            "order_id": order_id,
+            "status": status,
+            "status_message": status_message,
+        },
+    )
+
+
+def update_inventory(num_tokens: int) -> None:
+    """
+    Updates the inventory during an order
+
+    Args:
+        num_tokens (int): number of tokens bought
+
+    Raises:
+        InsufficientTokensError: not enough tokens in inventory
+    """
+    LOG.info("Updating inventory")
+
+    num_tokens_available: int = _services.get_num_tokens()
+
+    if num_tokens_available < num_tokens:
+        raise InsufficientTokensError
+
+    _services.deduct_tokens(num_tokens=num_tokens)
+
+
+def rollback(order_id: int, user_id: int, num_tokens: int) -> None:
+    """
+    Rolls back changes made
+
+    Args:
+        order_id (int): order id
+        user_id (int): user id
+        num_tokens (int): number of tokens
+    """
+    LOG.warning(f"Rolling back for order id {order_id}")
+    _services.add_tokens(num_tokens=num_tokens)
+    send_rollback_request(
+        Queue.payment_queue,
+        {"order_id": order_id, "user_id": user_id, "num_tokens": num_tokens},
+    )
+
+
+def send_rollback_request(queue: Queue, data: dict):
+    """
+    Sends a notice to rollback to preceding service
+
+    Args:
+        queue (Queue): queue to send notice to
+        data (dict): order information
+    """
+    LOG.warning(f"Sending rollback request to {queue.value}")
+    data = {"task": "rollback", **data}
+    RedisResource.push_to_queue(queue, data)
+
+
 def process_message(data):
     """
     Processes an incoming message from the work queue
     """
-    LOG.info("Deducting tokens")
-    _services.deduct_tokens(data["num_tokens"])
+    try:
+        if data["task"] == "rollback":
+            rollback(data["order_id"], data["user_id"], data["num_tokens"])
+        else:
+            user_id: int = data["user_id"]
+            order_id: int = data["order_id"]
+            num_tokens: int = data["num_tokens"]
 
-    LOG.info("Pushing to INVENTORY queue")
-    RedisResource.push_to_queue(Queue.delivery_queue, data)
+            update_inventory(num_tokens)
+
+            update_order_status(
+                order_id=order_id,
+                status="inventory",
+                status_message="Inventory updated",
+            )
+
+            LOG.info("Pushing to delivery queue")
+            RedisResource.push_to_queue(Queue.delivery_queue, data)
+    except Exception as e:
+        LOG.error("ERROR OCCURED! ", e.message)
+        update_order_status(
+            order_id=order_id,
+            status="failed",
+            status_message=e.message,
+        )
+        send_rollback_request(
+            Queue.payment_queue, {"order_id": order_id, "user_id": user_id}
+        )
 
 
 def main():

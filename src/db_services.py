@@ -32,7 +32,45 @@ def populate_inventory() -> None:
         session.commit()
 
 
+def get_num_tokens() -> int:
+    """
+    Gets the number of tokens
+
+    Returns:
+        int: the number of tokens (duh)
+    """
+    with Session(engine) as session:
+        query = select(Inventory)
+        inventory = session.exec(query).one()
+
+        return inventory.amount
+
+
+def add_tokens(num_tokens: int) -> None:
+    """
+    Adds `num_tokens` more tokens to inventory
+
+    Args:
+        num_tokens (int): number of tokens to add
+    """
+    with Session(engine) as session:
+        query = select(Inventory)
+        inventory = session.exec(query).one()
+
+        inventory.amount += num_tokens
+
+        session.add(inventory)
+        session.commit()
+        session.refresh(inventory)
+
+
 def deduct_tokens(num_tokens: int) -> None:
+    """
+    Deducts `num_tokens` tokens from inventory
+
+    Args:
+        num_tokens (int): number of tokens to deduct
+    """
     with Session(engine) as session:
         query = select(Inventory)
         inventory = session.exec(query).one()
