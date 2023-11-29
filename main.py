@@ -57,13 +57,9 @@ def watch_queue(redis_conn, queue_name, callback_func, timeout=30):
                 data = {"status": -1, "message": "An error occurred"}
                 redis_conn.publish(INVENTORY_QUEUE_NAME, json.dumps(data))
             if task:
-                # get trace context from the task and create new span using the context
-                carrier = {"traceparent": task["traceparent"]}
-                ctx = TraceContextTextMapPropagator().extract(carrier)
-                with tracer.start_as_current_span("push to delivery", context=ctx):
-                    callback_func(task)
-                    data = {"status": 1, "message": "Successfully chunked video"}
-                    redis_conn.publish(INVENTORY_QUEUE_NAME, json.dumps(task))
+                callback_func(task)
+                data = {"status": 1, "message": "Successfully chunked video"}
+                redis_conn.publish(INVENTORY_QUEUE_NAME, json.dumps(task))
 
 
 def update_order_status(order_id: int, status: str, status_message: str) -> None:
@@ -143,24 +139,28 @@ def process_message(data):
         if data["task"] == "rollback":
             rollback(data["order_id"], data["user_id"], data["num_tokens"])
         else:
-            user_id: int = data["user_id"]
-            order_id: int = data["order_id"]
-            num_tokens: int = data["num_tokens"]
+            # get trace context from the task and create new span using the context
+            carrier = {"traceparent": data["traceparent"]}
+            ctx = TraceContextTextMapPropagator().extract(carrier)
+            with tracer.start_as_current_span("push to delivery", context=ctx):
+                user_id: int = data["user_id"]
+                order_id: int = data["order_id"]
+                num_tokens: int = data["num_tokens"]
 
-            update_inventory(num_tokens)
+                update_inventory(num_tokens)
 
-            update_order_status(
-                order_id=order_id,
-                status="inventory",
-                status_message="Inventory updated",
-            )
+                update_order_status(
+                    order_id=order_id,
+                    status="inventory",
+                    status_message="Inventory updated",
+                )
 
-            LOG.info("Pushing to delivery queue")
-            carrier = {}
-            #pass the current context to the next service
-            TraceContextTextMapPropagator().inject(carrier)
-            data["traceparent"] = carrier["traceparent"]
-            RedisResource.push_to_queue(Queue.delivery_queue, data)
+                LOG.info("Pushing to delivery queue")
+                carrier = {}
+                #pass the current context to the next service
+                TraceContextTextMapPropagator().inject(carrier)
+                data["traceparent"] = carrier["traceparent"]
+                RedisResource.push_to_queue(Queue.delivery_queue, data)
     except Exception as e:
         LOG.error("ERROR OCCURED! ", e.message)
         update_order_status(
