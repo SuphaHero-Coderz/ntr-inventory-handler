@@ -7,6 +7,14 @@ from dotenv import load_dotenv
 from src.redis import RedisResource, Queue
 from src.exceptions import InsufficientTokensError
 import src.db_services as _services
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+
+provider = TracerProvider()
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer(__name__)
+
 
 load_dotenv()
 
@@ -49,9 +57,12 @@ def watch_queue(redis_conn, queue_name, callback_func, timeout=30):
                 data = {"status": -1, "message": "An error occurred"}
                 redis_conn.publish(INVENTORY_QUEUE_NAME, json.dumps(data))
             if task:
-                callback_func(task)
-                data = {"status": 1, "message": "Successfully chunked video"}
-                redis_conn.publish(INVENTORY_QUEUE_NAME, json.dumps(task))
+                carrier = {"traceparent": task["traceparent"]}
+                ctx = TraceContextTextMapPropagator().extract(carrier)
+                with tracer.start_as_current_span("push to delivery", context=ctx):
+                    callback_func(task)
+                    data = {"status": 1, "message": "Successfully chunked video"}
+                    redis_conn.publish(INVENTORY_QUEUE_NAME, json.dumps(task))
 
 
 def update_order_status(order_id: int, status: str, status_message: str) -> None:
@@ -144,6 +155,9 @@ def process_message(data):
             )
 
             LOG.info("Pushing to delivery queue")
+            carrier = {}
+            TraceContextTextMapPropagator().inject(carrier)
+            data["traceparent"] = carrier["traceparent"]
             RedisResource.push_to_queue(Queue.delivery_queue, data)
     except Exception as e:
         LOG.error("ERROR OCCURED! ", e.message)
