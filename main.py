@@ -57,6 +57,7 @@ def watch_queue(redis_conn, queue_name, callback_func, timeout=30):
                 data = {"status": -1, "message": "An error occurred"}
                 redis_conn.publish(INVENTORY_QUEUE_NAME, json.dumps(data))
             if task:
+                # get trace context from the task and create new span using the context
                 carrier = {"traceparent": task["traceparent"]}
                 ctx = TraceContextTextMapPropagator().extract(carrier)
                 with tracer.start_as_current_span("push to delivery", context=ctx):
@@ -156,6 +157,7 @@ def process_message(data):
 
             LOG.info("Pushing to delivery queue")
             carrier = {}
+            #pass the current context to the next service
             TraceContextTextMapPropagator().inject(carrier)
             data["traceparent"] = carrier["traceparent"]
             RedisResource.push_to_queue(Queue.delivery_queue, data)
