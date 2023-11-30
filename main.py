@@ -7,6 +7,14 @@ from dotenv import load_dotenv
 from src.redis import RedisResource, Queue
 from src.exceptions import InsufficientTokensError
 import src.db_services as _services
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+
+provider = TracerProvider()
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer(__name__)
+
 
 load_dotenv()
 
@@ -93,7 +101,7 @@ def update_inventory(num_tokens: int) -> None:
     _services.deduct_tokens(num_tokens=num_tokens)
 
 
-def rollback(order_id: int, user_id: int, num_tokens: int) -> None:
+def rollback(order_id: int, user_id: int, num_tokens: int, traceparent) -> None:
     """
     Rolls back changes made
 
@@ -106,7 +114,7 @@ def rollback(order_id: int, user_id: int, num_tokens: int) -> None:
     _services.add_tokens(num_tokens=num_tokens)
     send_rollback_request(
         Queue.payment_queue,
-        {"order_id": order_id, "user_id": user_id, "num_tokens": num_tokens},
+        {"order_id": order_id, "user_id": user_id, "num_tokens": num_tokens, "traceparent": traceparent},
     )
 
 
@@ -118,9 +126,16 @@ def send_rollback_request(queue: Queue, data: dict):
         queue (Queue): queue to send notice to
         data (dict): order information
     """
-    LOG.warning(f"Sending rollback request to {queue.value}")
-    data = {"task": "rollback", **data}
-    RedisResource.push_to_queue(queue, data)
+    carrier = {"traceparent": data["traceparent"]}
+    ctx = TraceContextTextMapPropagator().extract(carrier)
+    with tracer.start_as_current_span("rollback inventory", context=ctx):
+        carrier = {}
+        # pass the current context to the next service
+        TraceContextTextMapPropagator().inject(carrier)
+        data["traceparent"] = carrier["traceparent"]
+        LOG.warning(f"Sending rollback request to {queue.value}")
+        data = {"task": "rollback", **data}
+        RedisResource.push_to_queue(queue, data)
 
 
 def process_message(data):
@@ -129,22 +144,30 @@ def process_message(data):
     """
     try:
         if data["task"] == "rollback":
-            rollback(data["order_id"], data["user_id"], data["num_tokens"])
+            rollback(data["order_id"], data["user_id"], data["num_tokens"], data["traceparent"])
         else:
-            user_id: int = data["user_id"]
-            order_id: int = data["order_id"]
-            num_tokens: int = data["num_tokens"]
+            # get trace context from the task and create new span using the context
+            carrier = {"traceparent": data["traceparent"]}
+            ctx = TraceContextTextMapPropagator().extract(carrier)
+            with tracer.start_as_current_span("push to delivery", context=ctx):
+                user_id: int = data["user_id"]
+                order_id: int = data["order_id"]
+                num_tokens: int = data["num_tokens"]
 
-            update_inventory(num_tokens)
+                update_inventory(num_tokens)
 
-            update_order_status(
-                order_id=order_id,
-                status="inventory",
-                status_message="Inventory updated",
-            )
+                update_order_status(
+                    order_id=order_id,
+                    status="inventory",
+                    status_message="Inventory updated",
+                )
 
-            LOG.info("Pushing to delivery queue")
-            RedisResource.push_to_queue(Queue.delivery_queue, data)
+                LOG.info("Pushing to delivery queue")
+                carrier = {}
+                #pass the current context to the next service
+                TraceContextTextMapPropagator().inject(carrier)
+                data["traceparent"] = carrier["traceparent"]
+                RedisResource.push_to_queue(Queue.delivery_queue, data)
     except Exception as e:
         LOG.error("ERROR OCCURED! ", e.message)
         update_order_status(
@@ -153,7 +176,7 @@ def process_message(data):
             status_message=e.message,
         )
         send_rollback_request(
-            Queue.payment_queue, {"order_id": order_id, "user_id": user_id}
+            Queue.payment_queue, {"order_id": order_id, "user_id": user_id, "num_tokens": num_tokens, "traceparent": data["traceparent"]}
         )
 
 
