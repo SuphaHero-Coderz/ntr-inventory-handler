@@ -11,8 +11,6 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 
-provider = TracerProvider()
-trace.set_tracer_provider(provider)
 tracer = trace.get_tracer(__name__)
 
 
@@ -139,6 +137,7 @@ def send_rollback_request(queue: Queue, data: dict):
 
 
 def process_message(data):
+    LOG.info("begin inventory")
     """
     Processes an incoming message from the work queue
     """
@@ -168,6 +167,7 @@ def process_message(data):
                 TraceContextTextMapPropagator().inject(carrier)
                 data["traceparent"] = carrier["traceparent"]
                 RedisResource.push_to_queue(Queue.delivery_queue, data)
+                LOG.info("finish inventory")
     except Exception as e:
         LOG.error("ERROR OCCURED! ", e.message)
         update_order_status(
