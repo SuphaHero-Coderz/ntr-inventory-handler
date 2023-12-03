@@ -5,7 +5,7 @@ import json
 import uuid
 from dotenv import load_dotenv
 from src.redis import RedisResource, Queue
-from src.exceptions import InsufficientTokensError
+from src.exceptions import InsufficientTokensError, ForcedFailureError
 import src.db_services as _services
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry import trace
@@ -110,12 +110,20 @@ def rollback(order_id: int, user_id: int, num_tokens: int, traceparent) -> None:
         user_id (int): user id
         num_tokens (int): number of tokens
     """
+
     LOG.warning(f"Rolling back for order id {order_id}")
-    _services.add_tokens(num_tokens=num_tokens)
-    send_rollback_request(
-        Queue.payment_queue,
-        {"order_id": order_id, "user_id": user_id, "num_tokens": num_tokens, "traceparent": traceparent},
-    )
+    if _services.get_transaction(user_id=user_id, order_id=order_id):
+        _services.create_transaction(user_id, order_id, -num_tokens)
+        _services.add_tokens(num_tokens=num_tokens)
+        send_rollback_request(
+            Queue.payment_queue,
+            {
+                "order_id": order_id,
+                "user_id": user_id,
+                "num_tokens": num_tokens,
+                "traceparent": traceparent,
+            },
+        )
 
 
 def send_rollback_request(queue: Queue, data: dict):
@@ -144,7 +152,12 @@ def process_message(data):
     """
     try:
         if data["task"] == "rollback":
-            rollback(data["order_id"], data["user_id"], data["num_tokens"], data["traceparent"])
+            rollback(
+                data["order_id"],
+                data["user_id"],
+                data["num_tokens"],
+                data["traceparent"],
+            )
         else:
             # get trace context from the task and create new span using the context
             carrier = {"traceparent": data["traceparent"]}
@@ -153,8 +166,14 @@ def process_message(data):
                 user_id: int = data["user_id"]
                 order_id: int = data["order_id"]
                 num_tokens: int = data["num_tokens"]
+                inventory_fail: bool = data["inventory_fail"]
+                traceparent = data["traceparent"]
+
+                if inventory_fail:
+                    raise ForcedFailureError
 
                 update_inventory(num_tokens)
+                _services.create_transaction(user_id, order_id, num_tokens)
 
                 update_order_status(
                     order_id=order_id,
@@ -164,7 +183,7 @@ def process_message(data):
 
                 LOG.info("Pushing to delivery queue")
                 carrier = {}
-                #pass the current context to the next service
+                # pass the current context to the next service
                 TraceContextTextMapPropagator().inject(carrier)
                 data["traceparent"] = carrier["traceparent"]
                 RedisResource.push_to_queue(Queue.delivery_queue, data)
@@ -175,8 +194,15 @@ def process_message(data):
             status="failed",
             status_message=e.message,
         )
+        rollback(order_id, user_id, num_tokens, traceparent)
         send_rollback_request(
-            Queue.payment_queue, {"order_id": order_id, "user_id": user_id, "num_tokens": num_tokens, "traceparent": data["traceparent"]}
+            Queue.payment_queue,
+            {
+                "order_id": order_id,
+                "user_id": user_id,
+                "num_tokens": num_tokens,
+                "traceparent": data["traceparent"],
+            },
         )
 
 

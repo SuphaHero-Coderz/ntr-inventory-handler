@@ -1,6 +1,6 @@
 import src.database as _database
 from src.database import engine
-from src.models import Inventory
+from src.models import Inventory, InventoryTransaction
 from sqlmodel import Session, select
 
 DEFAULT_TOKEN_AMOUNT = 100
@@ -80,3 +80,31 @@ def deduct_tokens(num_tokens: int) -> None:
         session.add(inventory)
         session.commit()
         session.refresh(inventory)
+
+
+def create_transaction(
+    user_id: int, order_id: int, num_tokens: int
+) -> InventoryTransaction:
+    with Session(engine) as session:
+        transaction: InventoryTransaction = InventoryTransaction(
+            user_id=user_id, order_id=order_id, amount=num_tokens
+        )
+        session.add(transaction)
+        session.commit()
+
+        return transaction
+
+
+def get_transaction(user_id: int, order_id: int) -> InventoryTransaction:
+    with Session(engine) as session:
+        query = select(InventoryTransaction).where(
+            InventoryTransaction.user_id == user_id,
+            InventoryTransaction.order_id == order_id,
+        )
+
+        try:
+            transaction = session.exec(query).one()
+        except:
+            transaction = None
+
+        return transaction
