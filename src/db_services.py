@@ -3,7 +3,7 @@ from src.database import engine
 from src.models import Inventory, InventoryTransaction
 from sqlmodel import Session, select
 
-DEFAULT_TOKEN_AMOUNT = 100
+DEFAULT_TOKEN_AMOUNT = 1000
 
 """
 DATABASE ZONE
